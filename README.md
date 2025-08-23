@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🎵 Discord Music Bot
 
 Um bot de música para Discord com recursos de moderação, logs e reprodução de músicas do YouTube.
@@ -21,3 +22,6 @@ Um bot de música para Discord com recursos de moderação, logs e reprodução 
 ```bash
 git clone https://github.com/seu-usuario/discord-bot.git
 cd discord-bot
+=======
+# Tavern-bot-discord
+>>>>>>> 9b6454e8c8e33e5bd80ec160750740426295df7f
