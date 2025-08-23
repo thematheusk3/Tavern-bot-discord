@@ -41,10 +41,9 @@ YTDLP_OPTIONS = {
 
 # Solução: Aumentar o buffer no FFMPEG
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -buffersize 1024k',  # ← Aumentei o buffer
-    'options': '-vn -filter:a "volume=0.5" -af "acompressor=threshold=0.089:ratio=9:attack=200:release=1000"'
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
+    'options': '-vn -filter:a "volume=0.8" -ac 2 -ar 48000 -b:a 128k'
 }
-
 # ============================================================
 # CLASSES AUXILIARES PARA MÚSICA
 # ============================================================
@@ -345,12 +344,13 @@ class Comandos(commands.Cog):
     # COMANDOS DE MÚSICA
     # ========================================================
 
+
     @commands.command()
     async def play(self, ctx, *, query: str = None):
         """Toca música do YouTube - !play [nome/link]"""
         
-        if query is None:
-            # ... código da mensagem de ajuda
+        if query is None or query.strip() == "":
+            # ... código de ajuda permanece
             return
         
         if ctx.author.voice is None:
@@ -359,16 +359,18 @@ class Comandos(commands.Cog):
         
         voice_channel = ctx.author.voice.channel
         
+        # Conecta ou move o bot
         if ctx.voice_client is None:
-            await voice_channel.connect()
+            voice_client = await voice_channel.connect()
         elif ctx.voice_client.channel != voice_channel:
-            await ctx.voice_client.move_to(voice_channel)
+            voice_client = await ctx.voice_client.move_to(voice_channel)
+        else:
+            voice_client = ctx.voice_client
         
         await ctx.send(f"🔍 Procurando: `{query}`")
         
         try:
-            # ← ADICIONE UM DELAY PARA EVITAR RATE LIMITING
-            await asyncio.sleep(1)  # Delay de 1 segundo entre comandos
+            await asyncio.sleep(1)  # Delay anti-rate limiting
             
             player = await YTDLSource.from_url(query, loop=self.bot.loop, stream=True)
             
@@ -378,53 +380,114 @@ class Comandos(commands.Cog):
             self.queues[ctx.guild.id].append(player)
             await ctx.send(f"🎵 Adicionado à fila: **{player.title}**")
             
-            if not ctx.voice_client.is_playing():
-                await self.play_next(ctx)
+            # ← CORREÇÃO: Verificação mais robusta do estado de reprodução
+            is_playing = voice_client.is_playing()
+            is_paused = voice_client.is_paused()
+            
+            print(f"DEBUG: is_playing={is_playing}, is_paused={is_paused}, queue_size={len(self.queues[ctx.guild.id])}")
+            
+            if not is_playing and not is_paused:
+                await self.play_next(ctx, voice_client)
+            else:
+                print(f"DEBUG: Já está tocando ou pausado, apenas adicionou à fila")
                 
         except Exception as e:
-            error_msg = str(e).lower()
-            # ← NOVO: Tratamento específico para rate limiting
-            if "rate limit" in error_msg or "rate-limited" in error_msg:
-                await ctx.send("⏰ **YouTube está limitando requisições!**\nEspere um minuto antes de adicionar mais músicas.")
-            elif "private" in error_msg or "unavailable" in error_msg:
-                await ctx.send("❌ Este vídeo é privado ou não está disponível!")
-            elif "sign in" in error_msg:
-                await ctx.send("❌ Este vídeo requer login no YouTube!")
-            elif "age restricted" in error_msg:
-                await ctx.send("❌ Este vídeo é restrito por idade!")
-            else:
-                await ctx.send(f"❌ Erro ao reproduzir: {e}")
+            # ... tratamento de erro permanece
             print(f"Erro detalhado: {e}")
 
-    async def play_next(self, ctx):
+
+
+
+
+
+
+    async def play_next(self, ctx, voice_client=None):
         """Toca a próxima música da fila"""
-        if ctx.guild.id in self.queues and self.queues[ctx.guild.id]:
-            player = self.queues[ctx.guild.id].pop(0)
+        if voice_client is None:
+            voice_client = ctx.voice_client
+        
+        print(f"🎵 play_next chamado - voice_client: {voice_client}")
+        
+        # Verifica se há conexão de voz
+        if voice_client is None or not voice_client.is_connected():
+            print("❌ Voice client não conectado em play_next")
+            return
+        
+        # Verifica se há músicas na fila
+        if ctx.guild.id not in self.queues or not self.queues[ctx.guild.id]:
+            print("✅ Fila vazia - não há músicas para tocar")
+            # ← CORREÇÃO: Não envia mensagem se já está tocando
+            if not voice_client.is_playing():
+                await ctx.send("✅ Fila vazia! Use `!play` para adicionar mais músicas.")
+            return
+        
+        # Pega a próxima música
+        player = self.queues[ctx.guild.id].pop(0)
+        print(f"🎵 Próxima música: {player.title}")
+        
+        def after_playing(error):
+            print(f"🎵 after_playing chamado - erro: {error}")
+            if error:
+                print(f"❌ Erro na reprodução: {error}")
             
-            def after_playing(error):
-                if error:
-                    print(f"Erro na reprodução: {error}")
-                # Marca a música como finalizada e toca a próxima
-                player.finished = True
-                asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
+            # Marca a música como finalizada
+            player.finished = True
             
-            ctx.voice_client.play(player, after=after_playing)
+            # Agenda a próxima música de forma segura
+            async def next_song():
+                try:
+                    print("🎵 Agendando próxima música...")
+                    await asyncio.sleep(1)
+                    await self.play_next(ctx, voice_client)
+                except Exception as e:
+                    print(f"❌ Erro em next_song: {e}")
+            
+            # Executa no loop do bot
+            asyncio.run_coroutine_threadsafe(next_song(), self.bot.loop)
+        
+        try:
+            print(f"🎵 Iniciando reprodução: {player.title}")
+            
+            # Para qualquer reprodução atual (se houver)
+            if voice_client.is_playing():
+                voice_client.stop()
+                print("⏹️ Parando reprodução atual")
+                await asyncio.sleep(0.5)  # Delay após parar
+            
+            # Inicia a reprodução
+            voice_client.play(player, after=after_playing)
+            print(f"🎵 Reprodução iniciada para: {player.title}")
+            
+            # Mensagem para o usuário
             await ctx.send(f"🎵 Tocando agora: **{player.title}**")
-        else:
-            await ctx.send("✅ Fila vazia! Use `!play` para adicionar mais músicas.")
+            
+        except Exception as e:
+            print(f"❌ Erro ao iniciar reprodução: {e}")
+            # Se der erro, tenta a próxima música após delay
+            await asyncio.sleep(2)
+            await self.play_next(ctx, voice_client)
+
+
+
+
+
+   
+
+
 
     @commands.command()
     async def stop(self, ctx):
-        """Para a música e limpa a fila"""
+        """Para a música atual"""
         if ctx.voice_client is None:
             await ctx.send("❌ Não estou tocando nada!")
             return
         
-        if ctx.guild.id in self.queues:
-            self.queues[ctx.guild.id] = []
-        
-        ctx.voice_client.stop()
-        await ctx.send("⏹️ Música parada e fila limpa!")
+        # ← CORREÇÃO: Para apenas a música atual, não limpa a fila
+        if ctx.voice_client.is_playing():
+            ctx.voice_client.stop()
+            await ctx.send("⏹️ Música parada!")
+        else:
+            await ctx.send("❌ Não estou tocando nada!")
 
     @commands.command()
     async def skip(self, ctx):
@@ -433,7 +496,16 @@ class Comandos(commands.Cog):
             await ctx.send("❌ Não estou tocando nada!")
             return
         
+        # ← CORREÇÃO: Para a reprodução atual
         ctx.voice_client.stop()
+        
+        # ← CORREÇÃO: Chama a próxima música após um pequeno delay
+        async def play_next_after_skip():
+            await asyncio.sleep(0.5)  # Pequeno delay para garantir que stop() terminou
+            await self.play_next(ctx)
+        
+        # Executa a próxima música
+        asyncio.create_task(play_next_after_skip())
         await ctx.send("⏭️ Música pulada!")
 
     @commands.command()
@@ -475,38 +547,67 @@ class Comandos(commands.Cog):
         else:
             await ctx.send("❌ Volume deve estar entre 0 e 100!")
 
+
+
+    @commands.command()
+    async def clearqueue(self, ctx):
+        """Limpa a fila de músicas"""
+        if ctx.guild.id in self.queues:
+            queue_size = len(self.queues[ctx.guild.id])
+            self.queues[ctx.guild.id] = []
+            await ctx.send(f"🗑️ Fila limpa! {queue_size} música(s) removida(s).")
+        else:
+            await ctx.send("✅ A fila já está vazia!")
+  
+ 
+ 
     @commands.command()
     async def queue(self, ctx):
         """Mostra informações detalhadas da música atual e a fila"""
         
-        # Verifica se há música tocando no momento
+        # Verifica se há música tocando ou pausada no momento
         now_playing = ""
-        if ctx.voice_client and ctx.voice_client.is_playing():
-            player = ctx.voice_client.source
-            
-            if hasattr(player, 'finished') and player.finished:
-                now_playing = "🎵 **Música atual já terminou!** Use `!skip` para pular\n\n"
-            else:
-                current_pos = player.get_current_position()
-                total_duration = player.duration
+        is_playing = ctx.voice_client and ctx.voice_client.is_playing()
+        is_paused = ctx.voice_client and ctx.voice_client.is_paused()
+        
+        if is_playing or is_paused:
+            try:
+                player = ctx.voice_client.source
                 
-                progress_percent = min(current_pos / total_duration, 1.0) if total_duration > 0 else 0
-                progress_bar_length = 15
-                filled_length = int(progress_bar_length * progress_percent)
-                progress_bar = "▬" * filled_length + "🔘" + "▬" * (progress_bar_length - filled_length - 1)
-                
-                status = "⏸️ Pausada" if player.is_paused else "▶️ Tocando"
-                
-                now_playing = f"""
-🎵 **TOCANDO AGORA - #1** {status}
+                if hasattr(player, 'finished') and player.finished:
+                    now_playing = "🎵 **Música atual já terminou!** Use `!skip` para pular\n\n"
+                else:
+                    current_pos = player.get_current_position()
+                    total_duration = player.duration if hasattr(player, 'duration') else 0
+                    
+                    # Calcula progresso (com proteção contra divisão por zero)
+                    progress_percent = 0
+                    if total_duration > 0:
+                        progress_percent = min(current_pos / total_duration, 1.0)
+                    
+                    progress_bar_length = 15
+                    filled_length = int(progress_bar_length * progress_percent)
+                    progress_bar = "▬" * filled_length + "🔘" + "▬" * (progress_bar_length - filled_length - 1)
+                    
+                    # Determina status correto
+                    if is_paused:
+                        status = "⏸️ Pausada"
+                    else:
+                        status = "▶️ Tocando"
+                    
+                    now_playing = f"""
+    🎵 **TOCANDO AGORA - #1** {status}
 
-**Título:** {player.title}
-**Canal:** {player.uploader or "Desconhecido"}
-**Duração:** {player.format_time(total_duration)}
-**Progresso:** {player.format_time(current_pos)} / {player.format_time(total_duration)}
-{progress_bar} ({progress_percent:.1%})
+    **Título:** {player.title if hasattr(player, 'title') else 'Desconhecido'}
+    **Canal:** {player.uploader if hasattr(player, 'uploader') else 'Desconhecido'}
+    **Duração:** {player.format_time(total_duration) if hasattr(player, 'format_time') else '00:00'}
+    **Progresso:** {player.format_time(current_pos) if hasattr(player, 'format_time') else '00:00'} / {player.format_time(total_duration) if hasattr(player, 'format_time') else '00:00'}
+    {progress_bar} ({progress_percent:.1%})
 
-"""
+    """
+            except Exception as e:
+                now_playing = f"❌ **Erro ao obter informações da música:** `{str(e)[:50]}`\n\n"
+                print(f"Erro no comando queue: {e}")
         
         # Verifica se há músicas na fila
         queue_list = ""
@@ -516,46 +617,139 @@ class Comandos(commands.Cog):
         if ctx.guild.id in self.queues and self.queues[ctx.guild.id]:
             queue_count = len(self.queues[ctx.guild.id])
             
-            for i, song in enumerate(self.queues[ctx.guild.id][:10]):
-                position = i + 2
-                duration = song.format_time(song.duration) if song.duration > 0 else "Live"
-                queue_list += f"**#{position}.** {song.title} - `{duration}`\n"
-                total_duration += song.duration if song.duration else 0
+            # ← CORREÇÃO: Mostra a partir da posição 1, não 2
+            start_position = 1
             
-            if ctx.voice_client and ctx.voice_client.is_playing():
-                current_player = ctx.voice_client.source
-                current_pos = current_player.get_current_position()
-                remaining_current = current_player.duration - current_pos if current_player.duration > current_pos else 0
-                total_remaining = total_duration + remaining_current
-                remaining_text = f"\n⏰ **Tempo restante total:** {self.format_duration(total_remaining)}"
+            # Se está tocando uma música, a fila começa na posição 2
+            if is_playing or is_paused:
+                start_position = 2
+            
+            # Adiciona as músicas da fila (máximo 8)
+            for i, song in enumerate(self.queues[ctx.guild.id][:8]):
+                position = start_position + i
+                duration = song.format_time(song.duration) if hasattr(song, 'format_time') and song.duration > 0 else "Live"
+                song_title = song.title if hasattr(song, 'title') else 'Título desconhecido'
+                
+                # Encurta títulos muito longos
+                if len(song_title) > 45:
+                    song_title = song_title[:42] + "..."
+                    
+                queue_list += f"**#{position}.** {song_title} - `{duration}`\n"
+                total_duration += song.duration if hasattr(song, 'duration') and song.duration else 0
+            
+            # Adiciona contador se houver mais músicas
+            if queue_count > 8:
+                queue_list += f"\n**... e mais {queue_count - 8} música(s)**\n"
+            
+            # Calcula tempo restante
+            remaining_text = ""
+            if is_playing and hasattr(ctx.voice_client.source, 'get_current_position'):
+                try:
+                    current_player = ctx.voice_client.source
+                    current_pos = current_player.get_current_position()
+                    total_current = current_player.duration if hasattr(current_player, 'duration') else 0
+                    
+                    remaining_current = max(0, total_current - current_pos) if total_current > 0 else 0
+                    total_remaining = total_duration + remaining_current
+                    
+                    if total_remaining > 0:
+                        remaining_text = f"\n⏰ **Tempo restante total:** {self.format_duration(total_remaining)}"
+                    else:
+                        remaining_text = f"\n⏰ **Duração total da fila:** {self.format_duration(total_duration)}"
+                        
+                except Exception as e:
+                    remaining_text = f"\n⏰ **Duração total:** {self.format_duration(total_duration)}"
+                    print(f"Erro ao calcular tempo restante: {e}")
             else:
                 remaining_text = f"\n⏰ **Duração total da fila:** {self.format_duration(total_duration)}"
+                
         else:
             queue_list = "📋 **Fila vazia!** Use `!play` para adicionar músicas."
             remaining_text = ""
         
+        # Cor do embed baseada no status
+        embed_color = 0x1DB954  # Verde padrão
+        if is_paused:
+            embed_color = 0xFFA500  # Laranja para pausado
+        elif not is_playing and not is_paused:
+            embed_color = 0x808080  # Cinza para inativo
+        
         # Cria o embed
         embed = discord.Embed(
-            title="🎵 Player de Música",
+            title="🎵 Player de Música - Tavern Bot",
             description=f"{now_playing}{queue_list}{remaining_text}",
-            color=0x1DB954
+            color=embed_color
         )
         
-        # Adiciona thumbnail se estiver tocando
-        if ctx.voice_client and ctx.voice_client.is_playing():
-            player = ctx.voice_client.source
-            if hasattr(player, 'thumbnail') and player.thumbnail:
-                embed.set_thumbnail(url=player.thumbnail)
+        # Adiciona thumbnail se estiver tocando e tiver thumbnail
+        if is_playing or is_paused:
+            try:
+                player = ctx.voice_client.source
+                if hasattr(player, 'thumbnail') and player.thumbnail:
+                    embed.set_thumbnail(url=player.thumbnail)
+            except:
+                pass
         
         # Footer com informações totais
-        if ctx.voice_client and ctx.voice_client.is_playing():
-            footer_text = f"Total na fila: {queue_count} músicas"
-        else:
-            footer_text = "Nenhuma música tocando no momento"
+        footer_parts = []
         
-        embed.set_footer(text=footer_text)
+        if is_playing or is_paused:
+            footer_parts.append("Tocando agora")
+        else:
+            footer_parts.append("Reprodução parada")
+        
+        if queue_count > 0:
+            footer_parts.append(f"{queue_count} na fila")
+        
+        if not footer_parts:
+            footer_parts.append("Nenhuma música")
+        
+        embed.set_footer(text=" • ".join(footer_parts))
+        
+        # Adiciona timestamp
+        embed.timestamp = discord.utils.utcnow()
         
         await ctx.send(embed=embed)
+
+
+
+
+
+
+
+
+
+
+    @commands.command()
+    async def fila_debug(self, ctx):
+        """Debug detalhado do sistema de fila"""
+        debug_info = []
+        
+        if ctx.guild.id in self.queues:
+            debug_info.append(f"**Músicas na fila:** {len(self.queues[ctx.guild.id])}")
+            for i, song in enumerate(self.queues[ctx.guild.id]):
+                debug_info.append(f"{i+1}. {getattr(song, 'title', 'N/A')}")
+        else:
+            debug_info.append("**Fila não existe para este servidor**")
+        
+        if ctx.voice_client:
+            debug_info.append(f"**Tocando:** {ctx.voice_client.is_playing()}")
+            debug_info.append(f"**Pausado:** {ctx.voice_client.is_paused()}")
+            if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+                player = ctx.voice_client.source
+                debug_info.append(f"**Música atual:** {getattr(player, 'title', 'N/A')}")
+                debug_info.append(f"**Finalizada:** {getattr(player, 'finished', 'N/A')}")
+        
+        embed = discord.Embed(
+            title="🔧 Debug da Fila",
+            description="\n".join(debug_info),
+            color=0x0099ff
+        )
+        await ctx.send(embed=embed)
+
+
+
+
 
     @commands.command()
     async def progress(self, ctx):
