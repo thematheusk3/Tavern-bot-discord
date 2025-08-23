@@ -151,6 +151,7 @@ class Comandos(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.queues = {}  # Fila de música por servidor
+        self.skip_in_progress = {}  # ← NOVO: Controla se skip está em andamento
 
     # ========================================================
     # EVENTOS DO COG
@@ -193,6 +194,8 @@ class Comandos(commands.Cog):
             await voice_channel.connect()
             await ctx.send(f"🎧 Entrei em {voice_channel.name}")
 
+ 
+    
     @commands.command()
     async def leave(self, ctx):
         """Faz o bot sair da sala de voz"""
@@ -200,8 +203,16 @@ class Comandos(commands.Cog):
             await ctx.send("❌ Não estou em nenhum canal de voz!")
             return
         
+        # ← CORREÇÃO: Limpa a flag de skip
+        if ctx.guild.id in self.skip_in_progress:
+            del self.skip_in_progress[ctx.guild.id]
+        
         await ctx.voice_client.disconnect()
         await ctx.send("👋 Sai do canal de voz")
+
+
+
+
 
     @commands.command()
     async def info(self, ctx):
@@ -416,7 +427,6 @@ class Comandos(commands.Cog):
         # Verifica se há músicas na fila
         if ctx.guild.id not in self.queues or not self.queues[ctx.guild.id]:
             print("✅ Fila vazia - não há músicas para tocar")
-            # ← CORREÇÃO: Não envia mensagem se já está tocando
             if not voice_client.is_playing():
                 await ctx.send("✅ Fila vazia! Use `!play` para adicionar mais músicas.")
             return
@@ -427,6 +437,12 @@ class Comandos(commands.Cog):
         
         def after_playing(error):
             print(f"🎵 after_playing chamado - erro: {error}")
+            
+            # ← CORREÇÃO: Não faz nada se skip está em andamento
+            if ctx.guild.id in self.skip_in_progress and self.skip_in_progress[ctx.guild.id]:
+                print("⏩ Skip em andamento - ignorando after_playing")
+                return
+                
             if error:
                 print(f"❌ Erro na reprodução: {error}")
             
@@ -469,8 +485,6 @@ class Comandos(commands.Cog):
 
 
 
-
-
    
 
 
@@ -496,12 +510,17 @@ class Comandos(commands.Cog):
             await ctx.send("❌ Não estou tocando nada!")
             return
         
+        # ← CORREÇÃO: Marca que skip está em andamento
+        self.skip_in_progress[ctx.guild.id] = True
+        
         # ← CORREÇÃO: Para a reprodução atual
         ctx.voice_client.stop()
         
         # ← CORREÇÃO: Chama a próxima música após um pequeno delay
         async def play_next_after_skip():
             await asyncio.sleep(0.5)  # Pequeno delay para garantir que stop() terminou
+            # ← CORREÇÃO: Limpa a flag após o delay
+            self.skip_in_progress[ctx.guild.id] = False
             await self.play_next(ctx)
         
         # Executa a próxima música
