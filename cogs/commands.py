@@ -7,46 +7,51 @@ import asyncio
 import yt_dlp
 from discord import FFmpegPCMAudio
 
+
+bot_instance = None
+
+
 # ============================================================
 # CONFIGURAÇÕES GERAIS
 # ============================================================
 
 # Configurações SIMPLIFICADAS do yt-dlp
 # Configurações do yt-dlp com proteção contra rate limiting
+# Configurações do yt-dlp com foco em streaming
 YTDLP_OPTIONS = {
-    'format': 'bestaudio[acodec=opus]/bestaudio/best',  # ← Preferir Opus que é mais estável
-    'audio_format': 'best',  # ← Forçar formato de áudio
+    'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
-    'noplaylist': True,
+    'noplaylist': False,
     'nocheckcertificate': True,
-    'ignoreerrors': False,
+    'ignoreerrors': True,
     'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
+    'quiet': False,  # Reduz logs
+    'no_warnings': False,  # Reduz avisos
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
     'extract_flat': False,
-    'sleep_interval': 2,  # ← Delay de 2 segundos entre requisições
-    'max_sleep_interval': 5,  # ← Máximo de 5 segundos
-    'retries': 3,  # ← Tentar 3 vezes se falhar
-    'fragment_retries': 3,
-    'skip_unavailable_fragments': True,
+    'youtube_include_dash_manifest': False,
+    'youtube_include_hls_manifest': False,
     'extractor_args': {
         'youtube': {
-            'throttled_rate': '100K',  # ← Limita a taxa de download
+            'skip': ['dash', 'hls'],
+            'player_client': ['web']
         }
-    }
+    },
+    # Novas opções para melhor performance
+    'socket_timeout': 30,
+    'retries': 3,
 }
-
 # Solução: Aumentar o buffer no FFMPEG
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
     'options': '-vn -filter:a "volume=0.8" -ac 2 -ar 48000 -b:a 128k'
 }
 # ============================================================
-# CLASSES AUXILIARES PARA MÚSICA
+# CLASSES AUXILIARES PARA MÚSICA"""
 # ============================================================
+
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
         super().__init__(source, volume)
@@ -62,32 +67,148 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.finished = False
         self.actual_duration = data.get('duration', 0)
 
+    def get_current_position(self):
+        """Retorna a posição atual da música em segundos"""
+        if self.finished:
+            return self.duration
+        
+        if self.is_paused:
+            return self._position
+        
+        # Calcula o tempo decorrido
+        current_time = asyncio.get_event_loop().time()
+        elapsed = current_time - self.start_time - self.paused_time
+        self._position = min(elapsed, self.duration)
+        
+        return self._position
+
+
+
+
     @classmethod
-    async def from_url(cls, url, *, loop=None, stream=False):
+    async def from_url(cls, url, *, loop=None, stream=False, ctx_guild_id=None):  # ← Adicione o parâmetro aqui
         loop = loop or asyncio.get_event_loop()
         
         try:
-            # Limpa URL: Remove parâmetros de playlist
-            clean_url = url
-            if '&list=' in url:
-                clean_url = url.split('&list=')[0]
-            elif '?list=' in url:
-                clean_url = url.split('?list=')[0]
-            elif '&start_radio=' in url:
-                clean_url = url.split('&start_radio=')[0]
+            print(f"🔍 [DEBUG] Extraindo info da URL: {url}")
             
-            data = await loop.run_in_executor(None, lambda: cls.ytdl_extract_info(clean_url))
-            
-            # Se for playlist, pega apenas o primeiro vídeo
-            if 'entries' in data and data['entries']:
-                data = data['entries'][0]
-            
-            filename = data['url'] if stream else cls.ytdl_prepare_filename(data)
-            return cls(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS), data=data)
-            
+            with yt_dlp.YoutubeDL(YTDLP_OPTIONS) as ydl:
+                # Primeiro obtém apenas informações básicas rapidamente
+                info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False, process=False))
+                
+                # Se for playlist, processa apenas a primeira música primeiro
+                if 'entries' in info and info['entries']:
+                    print(f"🎵 [DEBUG] Playlist detectada: {info.get('title', 'Playlist sem nome')}")
+                    
+                    # Processa apenas a primeira música para começar rápido
+                    first_entry = info['entries'][0]
+                    if first_entry and not first_entry.get('is_live'):
+                        # Processa informações completas apenas da primeira música
+                        full_info = await loop.run_in_executor(
+                            None, 
+                            lambda: ydl.extract_info(first_entry['url'], download=False) if 'url' in first_entry else None
+                        )
+                        
+                        if full_info and 'url' in full_info:
+                            player = cls(discord.FFmpegPCMAudio(full_info['url'], **FFMPEG_OPTIONS), data=full_info)
+                            player.is_playlist = True
+                            player.playlist_title = info.get('title', 'Playlist do YouTube')
+                            player.playlist_index = 1
+                            
+                            # Processa o restante da playlist em segundo plano
+                            if ctx_guild_id:  # ← Verifique se ctx_guild_id foi fornecido
+                                asyncio.create_task(cls.process_remaining_playlist(ydl, info['entries'][1:], loop, ctx_guild_id))
+                            
+                            return [player]  # Retorna apenas a primeira música como lista
+                    
+                    raise Exception("Nenhum vídeo válido na playlist")
+                
+                else:
+                    # É uma música única - processa normalmente
+                    full_info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+                    filename = full_info['url'] if stream else ydl.prepare_filename(full_info)
+                    player = cls(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS), data=full_info)
+                    player.is_playlist = False
+                    return player
+                    
         except Exception as e:
-            print(f"Erro no from_url: {e}")
-            raise Exception(f"Não foi possível extrair o áudio: {e}")
+            print(f"❌ [DEBUG] Erro no from_url: {e}")
+            # Fallback para o método tradicional
+            return await cls.fallback_method(url, loop, stream)
+
+
+    @classmethod
+    async def process_remaining_playlist(cls, ydl, remaining_entries, loop, guild_id):
+        """Processa o restante da playlist em segundo plano e adiciona à fila"""
+        try:
+            from .commands import bot  # Importa o bot para acessar a fila
+            
+            playlist_songs = []
+            
+            for index, entry in enumerate(remaining_entries, start=2):  # Começa da 2ª música
+                if entry and not entry.get('is_live'):
+                    try:
+                        full_info = await loop.run_in_executor(
+                            None, 
+                            lambda: ydl.extract_info(entry['url'], download=False) if 'url' in entry else None
+                        )
+                        
+                        if full_info and 'url' in full_info:
+                            player = cls(discord.FFmpegPCMAudio(full_info['url'], **FFMPEG_OPTIONS), data=full_info)
+                            player.is_playlist = True
+                            player.playlist_index = index
+                            
+                            playlist_songs.append(player)
+                            print(f"🎵 [BACKGROUND] Adicionado vídeo {index}: {full_info.get('title', 'Sem título')}")
+                            
+                    except Exception as e:
+                        print(f"❌ [BACKGROUND] Erro ao processar vídeo {index}: {e}")
+                        continue
+            
+            # Adiciona as músicas processadas à fila do servidor
+            if playlist_songs:
+                # Acessa a fila do servidor através do bot
+                cog = bot.get_cog('Comandos')
+                if cog and guild_id in cog.queues:
+                    cog.queues[guild_id].extend(playlist_songs)
+                    print(f"🎵 [BACKGROUND] {len(playlist_songs)} músicas adicionadas à fila")
+                    
+        except Exception as e:
+            print(f"❌ [BACKGROUND] Erro no processamento em segundo plano: {e}")
+
+
+
+
+
+
+    @classmethod
+    async def fallback_method(cls, url, loop, stream):
+        """Método fallback tradicional"""
+        data = await loop.run_in_executor(None, lambda: cls.ytdl_extract_info(url))
+        
+        if 'entries' in data and data['entries']:
+            playlist_songs = []
+            for index, entry in enumerate(data['entries']):
+                if entry and not entry.get('is_live'):
+                    try:
+                        filename = entry['url'] if stream else cls.ytdl_prepare_filename(entry)
+                        player = cls(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS), data=entry)
+                        player.is_playlist = True
+                        player.playlist_title = data.get('title', 'Playlist do YouTube')
+                        player.playlist_index = index + 1
+                        playlist_songs.append(player)
+                    except Exception as e:
+                        print(f"❌ [FALLBACK] Erro ao processar vídeo {index+1}: {e}")
+                        continue
+            
+            if playlist_songs:
+                return playlist_songs
+        
+        # Para música única ou fallback
+        filename = data['url'] if stream else cls.ytdl_prepare_filename(data)
+        player = cls(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS), data=data)
+        player.is_playlist = False
+        return player
 
     @staticmethod
     def ytdl_extract_info(url):
@@ -98,50 +219,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
     def ytdl_prepare_filename(data):
         with yt_dlp.YoutubeDL(YTDLP_OPTIONS) as ydl:
             return ydl.prepare_filename(data)
-
-    def get_current_position(self):
-        """Retorna a posição atual da música em segundos"""
-        if self.finished:
-            return self.actual_duration
         
-        if self.is_paused:
-            return self.paused_time
-        
-        current_time = asyncio.get_event_loop().time()
-        elapsed = current_time - self.start_time
-        current_pos = self.paused_time + elapsed
-        
-        if self.actual_duration > 0 and current_pos >= self.actual_duration:
-            self.finished = True
-            return self.actual_duration
-        
-        return current_pos
-
-    def format_time(self, seconds):
-        """Formata segundos para MM:SS ou HH:MM:SS"""
-        if seconds is None:
-            return "00:00"
-        
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        seconds = int(seconds % 60)
-        
-        if hours > 0:
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        else:
-            return f"{minutes:02d}:{seconds:02d}"
-
-    def pause(self):
-        """Marca pausa"""
-        if not self.is_paused:
-            self.paused_time = self.get_current_position()
-            self.is_paused = True
-
-    def resume(self):
-        """Marca retomada"""
-        if self.is_paused:
-            self.start_time = asyncio.get_event_loop().time()
-            self.is_paused = False
 
 # ============================================================
 # CLASSE PRINCIPAL DE COMANDOS
@@ -256,6 +334,17 @@ class Comandos(commands.Cog):
         
         await ctx.send(embed=embed)
 
+
+    async def status_music(self, music_text: str):
+        """Define o status de música programaticamente"""
+        activity = discord.Activity(
+            name=music_text,
+            type=discord.ActivityType.listening
+        )
+        await self.bot.change_presence(activity=activity)
+        print(f"🎵 Status definido para: {music_text}")
+    
+
     # ========================================================
     # COMANDOS DE API (PROMPT)
     # ========================================================
@@ -356,9 +445,11 @@ class Comandos(commands.Cog):
     # ========================================================
 
 
+
+
     @commands.command()
     async def play(self, ctx, *, query: str = None):
-        """Toca música do YouTube - !play [nome/link]"""
+        """Toca música do YouTube - !play [nome/link/playlist]"""
         
         if query is None or query.strip() == "":
             # ... código de ajuda permanece
@@ -370,41 +461,112 @@ class Comandos(commands.Cog):
         
         voice_channel = ctx.author.voice.channel
         
-        # Conecta ou move o bot
         if ctx.voice_client is None:
-            voice_client = await voice_channel.connect()
+            await voice_channel.connect()
         elif ctx.voice_client.channel != voice_channel:
-            voice_client = await ctx.voice_client.move_to(voice_channel)
-        else:
-            voice_client = ctx.voice_client
+            await ctx.voice_client.move_to(voice_channel)
         
         await ctx.send(f"🔍 Procurando: `{query}`")
         
         try:
-            await asyncio.sleep(1)  # Delay anti-rate limiting
+            # Mostra que está processando
+            processing_msg = await ctx.send("⏳ Processando...")
             
-            player = await YTDLSource.from_url(query, loop=self.bot.loop, stream=True)
+            result = await YTDLSource.from_url(query, loop=self.bot.loop, stream=True, ctx_guild_id=ctx.guild.id)
             
             if ctx.guild.id not in self.queues:
                 self.queues[ctx.guild.id] = []
             
-            self.queues[ctx.guild.id].append(player)
-            await ctx.send(f"🎵 Adicionado à fila: **{player.title}**")
-            
-            # ← CORREÇÃO: Verificação mais robusta do estado de reprodução
-            is_playing = voice_client.is_playing()
-            is_paused = voice_client.is_paused()
-            
-            print(f"DEBUG: is_playing={is_playing}, is_paused={is_paused}, queue_size={len(self.queues[ctx.guild.id])}")
-            
-            if not is_playing and not is_paused:
-                await self.play_next(ctx, voice_client)
+            if isinstance(result, list):
+                # É uma playlist - apenas a primeira música já está processada
+                first_song = result[0]
+                self.queues[ctx.guild.id].append(first_song)
+                
+                await processing_msg.delete()
+                
+                embed = discord.Embed(
+                    title="🎵 Playlist Sendo Adicionada",
+                    description=f"**{first_song.playlist_title}**",
+                    color=0x1DB954
+                )
+                embed.add_field(name="Status", value="Primeira música começando agora...\nRestante sendo processado em background", inline=True)
+                
+                await ctx.send(embed=embed)
+                
             else:
-                print(f"DEBUG: Já está tocando ou pausado, apenas adicionou à fila")
+                # É uma música única
+                player = result
+                self.queues[ctx.guild.id].append(player)
+                await processing_msg.delete()
+                await ctx.send(f"🎵 Adicionado à fila: **{player.title}**")
+            
+            # Se não está tocando nada, começa a tocar
+            if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                await self.play_next(ctx)
                 
         except Exception as e:
-            # ... tratamento de erro permanece
+            error_msg = str(e).lower()
+            if "rate-limit" in error_msg or "rate limited" in error_msg or "429" in error_msg:
+                await ctx.send("⏰ **YouTube está limitando requisições!**\n📋 Espere 1-2 minutos antes de adicionar mais músicas.")
+            else:
+                await ctx.send(f"❌ Erro ao reproduzir: {str(e)[:100]}...")
+            
             print(f"Erro detalhado: {e}")
+
+
+
+
+
+
+
+
+    @commands.command()
+    async def playlist(self, ctx, url: str):
+        """Adiciona uma playlist completa à fila"""
+        try:
+            print(f"🎵 [PLAYLIST] Processando: {url}")
+            
+            # Força o processamento como playlist
+            #result = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
+            result = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True, ctx_guild_id=ctx.guild.id)
+            
+            if ctx.guild.id not in self.queues:
+                self.queues[ctx.guild.id] = []
+            
+            if isinstance(result, list):
+                # É uma playlist
+                playlist = result
+                self.queues[ctx.guild.id].extend(playlist)
+                
+                embed = discord.Embed(
+                    title="🎵 Playlist Adicionada",
+                    description=f"**{playlist[0].playlist_title}**",
+                    color=0x1DB954
+                )
+                embed.add_field(name="Músicas", value=f"{len(playlist)} músicas adicionadas", inline=True)
+                
+                total_duration = sum(song.duration for song in playlist if hasattr(song, 'duration') and song.duration)
+                embed.add_field(name="Duração Total", value=self.format_duration(total_duration), inline=True)
+                
+                start_pos = len(self.queues[ctx.guild.id]) - len(playlist) + 1
+                end_pos = len(self.queues[ctx.guild.id])
+                embed.add_field(name="Posição na Fila", value=f"{start_pos} a {end_pos}", inline=False)
+                
+                await ctx.send(embed=embed)
+                
+            else:
+                # Se não foi uma playlist, adiciona como música única
+                self.queues[ctx.guild.id].append(result)
+                await ctx.send(f"🎵 Adicionado à fila: **{result.title}**")
+            
+            # Se não está tocando nada, começa a tocar
+            if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                await self.play_next(ctx)
+                
+        except Exception as e:
+            await ctx.send(f"❌ Erro ao processar playlist: {str(e)[:100]}")
+
+
 
 
 
@@ -429,6 +591,7 @@ class Comandos(commands.Cog):
             print("✅ Fila vazia - não há músicas para tocar")
             if not voice_client.is_playing():
                 await ctx.send("✅ Fila vazia! Use `!play` para adicionar mais músicas.")
+                await self.status_music("a voz de um mudo.")
             return
         
         # Pega a próxima música
@@ -476,6 +639,7 @@ class Comandos(commands.Cog):
             
             # Mensagem para o usuário
             await ctx.send(f"🎵 Tocando agora: **{player.title}**")
+            await self.status_music(f"{player.title}")
             
         except Exception as e:
             print(f"❌ Erro ao iniciar reprodução: {e}")
@@ -767,6 +931,14 @@ class Comandos(commands.Cog):
         await ctx.send(embed=embed)
 
 
+    def format_time(self, seconds):
+        """Formata segundos para formato MM:SS"""
+        if seconds <= 0:
+            return "00:00"
+        
+        minutes = int(seconds // 60)
+        seconds = int(seconds % 60)
+        return f"{minutes:02d}:{seconds:02d}"
 
 
 
@@ -841,4 +1013,6 @@ class Comandos(commands.Cog):
 # ============================================================
 
 async def setup(bot):
+    global bot_instance
+    bot_instance = bot
     await bot.add_cog(Comandos(bot))
