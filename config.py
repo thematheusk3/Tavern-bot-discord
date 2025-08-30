@@ -8,6 +8,7 @@ load_dotenv()
 
 
 API_URL = "http://192.168.31.134:5001/api/chat"
+API_IMAGINE = "http://192.168.31.134:5000/api/generate"
 API_TIMEOUT = 60  # Timeout de 60 segundos
 
 # Configurações do bot - com verificação

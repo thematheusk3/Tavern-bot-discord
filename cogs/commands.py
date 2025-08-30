@@ -1,7 +1,7 @@
 # cogs/commands.py
 import discord
 from discord.ext import commands
-from config import CANAIS_PERMITIDOS, API_URL, API_TIMEOUT
+from config import CANAIS_PERMITIDOS, API_URL, API_IMAGINE, API_TIMEOUT
 import aiohttp
 import asyncio
 import yt_dlp
@@ -455,14 +455,14 @@ class Comandos(commands.Cog):
         
         try:
             # Fazer requisição para sua API
-            api_url = "http://localhost:5000/api/generate"
+            #API_IMAGINE = "http://localhost:5000/api/generate"
             payload = {
                 "prompt": prompt,
                 "return_base64": True  # Importante para o Discord
             }
             
             async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload) as response:
+                async with session.post(API_IMAGINE, json=payload) as response:
                     
                     if response.status == 200:
                         data = await response.json()
