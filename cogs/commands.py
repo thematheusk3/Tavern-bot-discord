@@ -6,6 +6,8 @@ import aiohttp
 import asyncio
 import yt_dlp
 from discord import FFmpegPCMAudio
+import base64
+import io
 
 
 bot_instance = None
@@ -440,6 +442,58 @@ class Comandos(commands.Cog):
         embed.set_footer(text="Isso é uma limitação do YouTube, não do bot!")
         
         await ctx.send(embed=embed)
+
+
+
+
+
+    @commands.command()
+    async def imagine(self, ctx, *, prompt):
+        """Gera uma imagem a partir de um prompt"""
+        # Mensagem de processamento
+        processing_msg = await ctx.send("🖌️ Gerando sua imagem...")
+        
+        try:
+            # Fazer requisição para sua API
+            api_url = "http://localhost:5000/api/generate"
+            payload = {
+                "prompt": prompt,
+                "return_base64": True  # Importante para o Discord
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, json=payload) as response:
+                    
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if data['status'] == 'success':
+                            # Decodificar base64
+                            image_data = base64.b64decode(data['image_base64'])
+                            
+                            # Criar arquivo para o Discord
+                            image_file = discord.File(
+                                io.BytesIO(image_data), 
+                                filename=data['filename']
+                            )
+                            
+                            # Editar mensagem e enviar imagem
+                            await processing_msg.edit(content="✅ Imagem gerada com sucesso!")
+                            await ctx.send(file=image_file)
+                            
+                        else:
+                            await processing_msg.edit(content=f"❌ Erro: {data.get('message', 'Erro desconhecido')}")
+                    else:
+                        await processing_msg.edit(content="❌ Erro ao conectar com o servidor de IA")
+                        
+        except Exception as e:
+            await processing_msg.edit(content=f"❌ Erro: {str(e)}")
+
+
+
+
+
+
     # ========================================================
     # COMANDOS DE MÚSICA
     # ========================================================
