@@ -476,22 +476,86 @@ class Comandos(commands.Cog):
                                 io.BytesIO(image_data), 
                                 filename=data['filename']
                             )
-                            
                             # Editar mensagem e enviar imagem
                             await processing_msg.edit(content="✅ Imagem gerada com sucesso!")
-                            await ctx.send(file=image_file)
-                            
+                            await ctx.send(file=image_file) 
                         else:
                             await processing_msg.edit(content=f"❌ Erro: {data.get('message', 'Erro desconhecido')}")
                     else:
-                        await processing_msg.edit(content="❌ Erro ao conectar com o servidor de IA")
-                        
+                        await processing_msg.edit(content="❌ Erro ao conectar com o servidor de IA")              
         except Exception as e:
             await processing_msg.edit(content=f"❌ Erro: {str(e)}")
 
 
 
-
+    @commands.command()
+    async def imaginepro(self, ctx, *, prompt_text: str):
+        """Gera uma imagem a partir de um prompt otimizado automaticamente"""
+        
+        # Primeiro, otimiza o prompt usando a API
+        loading_msg = await ctx.send("🔄 **Otimizando prompt e gerando imagem...** (timeout: 90s)")
+        
+        try:
+            # Cria o prompt de otimização
+            optimization_prompt = f"Atue como um especialista em prompt de geração de imagem. Otimize este prompt para geração de imagens AI, tornando-o mais detalhado e eficaz. Mantenha o mesmo conteúdo básico, mas adicione detalhes relevantes para melhorar os resultados. Responda APENAS com o prompt otimizado, em inglês: {prompt_text}"
+            
+            # Faz a requisição para otimizar o prompt
+            optimized_prompt = await self.fazer_request_api(optimization_prompt)
+            
+            await loading_msg.edit(content="✅ **Prompt otimizado!** Gerando imagem...")
+            
+            # Agora usa o prompt otimizado para gerar a imagem
+            payload = {
+                "prompt": optimized_prompt,
+                "return_base64": True
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(API_IMAGINE, json=payload) as response:
+                    
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if data['status'] == 'success':
+                            # Decodificar base64
+                            image_data = base64.b64decode(data['image_base64'])
+                            
+                            # Criar arquivo para o Discord
+                            image_file = discord.File(
+                                io.BytesIO(image_data), 
+                                filename=f"imaginepro_{ctx.message.id}.png"
+                            )
+                            
+                            # Envia o resultado
+                            await loading_msg.delete()
+                            
+                            # Mostra o prompt original e o otimizado
+                            embed = discord.Embed(
+                                title="🎨 ImaginePro - Imagem Gerada",
+                                description=f"**Prompt original:**\n`{prompt_text[:200]}{'...' if len(prompt_text) > 200 else ''}`",
+                                color=0x00ff00
+                            )
+                            embed.add_field(
+                                name="📝 Prompt otimizado",
+                                value=f"```{optimized_prompt[:500]}{'...' if len(optimized_prompt) > 500 else ''}```",
+                                inline=False
+                            )
+                            embed.set_footer(text="Imagem gerada a partir do prompt otimizado")
+                            
+                            await ctx.send(embed=embed)
+                            await ctx.send(file=image_file)
+                            
+                        else:
+                            await loading_msg.edit(content=f"❌ Erro na geração: {data.get('message', 'Erro desconhecido')}")
+                    else:
+                        await loading_msg.edit(content="❌ Erro ao conectar com o servidor de IA")
+                        
+        except asyncio.TimeoutError:
+            await loading_msg.edit(content="⏰ **Timeout!** A operação demorou mais de 90 segundos.")
+        except aiohttp.ClientError as e:
+            await loading_msg.edit(content=f"🌐 **Erro de conexão:** {e}")
+        except Exception as e:
+            await loading_msg.edit(content=f"❌ **Erro inesperado:** {e}")
 
 
     # ========================================================
@@ -1054,6 +1118,7 @@ class Comandos(commands.Cog):
     @resume.error
     @volume.error
     @progress.error
+    @imaginepro.error
     async def cog_check_error(self, ctx, error):
         if isinstance(error, commands.CheckFailure):
             canais_mention = " ".join([f"<#{id}>" for id in CANAIS_PERMITIDOS])
