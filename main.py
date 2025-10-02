@@ -32,7 +32,7 @@ async def on_ready():
 
 async def load_cogs():
     """Carrega todos os cogs da pasta cogs/"""
-    cogs = ["commands", "admin","music"]  # Lista de cogs para carregar
+    cogs = ["commands", "admin","music","monitor"]  # Lista de cogs para carregar
     
     for cog in cogs:
         try:
